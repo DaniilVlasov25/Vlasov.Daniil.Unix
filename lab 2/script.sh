@@ -5,11 +5,11 @@ I=$(hostname)
 C=0
 mkdir -p $S; touch $L
 
-exec 200>"$L"
+exec 300>"$L"
 
 while true; do
 	current_file=""
-	flock -x 200
+	flock -x 300
 	i=1
 	while [ $i -le 999 ]; do
 		f=$(printf %03d $i) 
@@ -23,7 +23,7 @@ while true; do
 		i=$((i+1))
 	done
 	
-	flock -u 200
+	flock -u 300
 	
 	if [ -n "$current_file" ]; then
 		sleep 1
