@@ -2,143 +2,141 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
+#include <sys/select.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <signal.h>
-#include <sys/select.h>
 #include <errno.h>
 
-volatile sig_atomic_t wasSigHup = 0;
+#define PORT 8080
 
+volatile sig_atomic_t wasSigHup = 0;
 
 void sigHupHandler(int sig) {
     wasSigHup = 1;
 }
 
-int main(int argc, char *argv[]) {
-    int server_fd, new_socket, max_fd;
-    struct sockaddr_in address;
+int main() {
+    int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (serverSocket < 0) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+
     int opt = 1;
-    int addrlen = sizeof(address);
-    fd_set read_fds, temp_fds;
-    sigset_t blockedMask, origMask;
-    struct sigaction sa;
-
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <port>\n", argv[0]);
-        exit(EXIT_FAILURE);
-    }
-
-
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
-        perror("socket failed");
-        exit(EXIT_FAILURE);
-    }
-
-
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
+    if (setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         perror("setsockopt");
+        close(serverSocket);
         exit(EXIT_FAILURE);
     }
 
+    struct sockaddr_in serverAddr = {0};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    serverAddr.sin_port = htons(PORT);
 
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(atoi(argv[1]));
-
-
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        perror("bind failed");
+    if (bind(serverSocket, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0) {
+        perror("bind");
+        close(serverSocket);
         exit(EXIT_FAILURE);
     }
 
-
-    if (listen(server_fd, 3) < 0) {
+    if (listen(serverSocket, 1) < 0) {
         perror("listen");
+        close(serverSocket);
         exit(EXIT_FAILURE);
     }
 
-    printf("Server listening on port %s\n", argv[1]);
+    printf("Сервер запущен на порту %d. Ожидание соединений...\n", PORT);
 
-
-    sigaction(SIGHUP, NULL, &sa);
+    struct sigaction sa;
+    sigemptyset(&sa.sa_mask);
     sa.sa_handler = sigHupHandler;
-    sa.sa_flags |= SA_RESTART; 
-    sigaction(SIGHUP, &sa, NULL);
+    sa.sa_flags = SA_RESTART;
+    if (sigaction(SIGHUP, &sa, NULL) == -1) {
+        perror("sigaction");
+        close(serverSocket);
+        exit(EXIT_FAILURE);
+    }
 
-  
+    sigset_t blockedMask, origMask;
     sigemptyset(&blockedMask);
     sigaddset(&blockedMask, SIGHUP);
-    sigprocmask(SIG_BLOCK, &blockedMask, &origMask);
+    if (sigprocmask(SIG_BLOCK, &blockedMask, &origMask) == -1) {
+        perror("sigprocmask");
+        close(serverSocket);
+        exit(EXIT_FAILURE);
+    }
 
- 
-    FD_ZERO(&read_fds);
-    FD_SET(server_fd, &read_fds);
-    max_fd = server_fd;
+    int clientSocket = -1;
 
     while (1) {
-        temp_fds = read_fds;
+        fd_set readFds;
+        FD_ZERO(&readFds);
+        FD_SET(serverSocket, &readFds);
+        int maxFd = serverSocket;
 
-        int activity = pselect(max_fd + 1, &temp_fds, NULL, NULL, NULL, &origMask);
-
-        if (activity < 0 && errno != EINTR) {
-            perror("pselect error");
-            break;
+        if (clientSocket != -1) {
+            FD_SET(clientSocket, &readFds);
+            if (clientSocket > maxFd)
+                maxFd = clientSocket;
         }
 
-        if (wasSigHup) {
-            wasSigHup = 0;
-            printf("Received SIGHUP signal.\n");
-        }
-
-
-        if (FD_ISSET(server_fd, &temp_fds)) {
-            if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
-                perror("accept");
+        int ready = pselect(maxFd + 1, &readFds, NULL, NULL, NULL, &origMask);
+        if (ready == -1) {
+            if (errno == EINTR) {
+                if (wasSigHup) {
+                    wasSigHup = 0;
+                    printf("Получен и обработан сигнал SIGHUP\n");
+                }
                 continue;
-            }
-
-
-            static int firstConnection = 1;
-            if (firstConnection) {
-                printf("New connection accepted from %s:%d\n",
-                       inet_ntoa(address.sin_addr), ntohs(address.sin_port));
-                FD_SET(new_socket, &read_fds);
-                if (new_socket > max_fd) {
-                    max_fd = new_socket;
-                }
-                firstConnection = 0;
             } else {
-                printf("Closing additional connection from %s:%d\n",
-                       inet_ntoa(address.sin_addr), ntohs(address.sin_port));
-                close(new_socket); 
+                perror("pselect");
+                break;
             }
         }
 
-
-        for (int i = 0; i <= max_fd; i++) {
-            if (i != server_fd && FD_ISSET(i, &temp_fds)) { 
-                char buffer[1024] = {0};
-                int valread = read(i, buffer, 1024);
-
-                if (valread > 0) {
-
-                    printf("Received %d bytes of data from client.\n", valread);
-                } else if (valread == 0) {
-                    printf("Client disconnected.\n");
-                    close(i);
-                    FD_CLR(i, &read_fds);
+        if (FD_ISSET(serverSocket, &readFds)) {
+            if (clientSocket == -1) {
+                struct sockaddr_in clientAddr;
+                socklen_t clientLen = sizeof(clientAddr);
+                clientSocket = accept(serverSocket, (struct sockaddr *)&clientAddr, &clientLen);
+                if (clientSocket >= 0) {
+                    char ipStr[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &clientAddr.sin_addr, ipStr, INET_ADDRSTRLEN);
+                    printf("Новое соединение от %s:%d\n", ipStr, ntohs(clientAddr.sin_port));
                 } else {
-                    perror("read");
-                    close(i);
-                    FD_CLR(i, &read_fds);
+                    perror("accept");
                 }
+            } else {
+                int tmp = accept(serverSocket, NULL, NULL);
+                if (tmp != -1) {
+                    printf("Отклонено дополнительное соединение\n");
+                    close(tmp);
+                }
+            }
+        }
+
+        if (clientSocket != -1 && FD_ISSET(clientSocket, &readFds)) {
+            char buffer[1024];
+            ssize_t bytesRead = read(clientSocket, buffer, sizeof(buffer) - 1);
+            if (bytesRead > 0) {
+                printf("Получено %zd байт от клиента\n", bytesRead);
+            } else if (bytesRead == 0) {
+                printf("Клиент отключился\n");
+                close(clientSocket);
+                clientSocket = -1;
+            } else {
+                perror("read");
+                close(clientSocket);
+                clientSocket = -1;
             }
         }
     }
 
-    close(server_fd);
+    if (clientSocket != -1) close(clientSocket);
+    close(serverSocket);
     return 0;
 }
