@@ -10,7 +10,6 @@
 
 namespace fs = std::filesystem;
 
-// Вычисление SHA1 хеша файла через системные вызовы (open/read)
 std::string make_hash(const std::string& filepath)
 {
     int fd = open(filepath.c_str(), O_RDONLY);
@@ -53,7 +52,6 @@ std::string make_hash(const std::string& filepath)
 
     close(fd);
 
-    // Преобразуем в hex-строку
     char hex[SHA_DIGEST_LENGTH * 2 + 1];
     for (int i = 0; i < SHA_DIGEST_LENGTH; ++i) {
         std::snprintf(hex + i * 2, 3, "%02x", raw[i]);
@@ -76,7 +74,6 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // Карта: хеш -> путь к "оригиналу" (первый файл с таким хешем)
     std::unordered_map<std::string, std::string> seen_hashes;
 
     int processed_count = 0;
@@ -91,45 +88,38 @@ int main(int argc, char* argv[])
             std::string current_file = entry.path().string();
             std::string hash = make_hash(current_file);
             if (hash.empty()) {
-                continue; // Ошибка хеширования — пропускаем
+                continue; 
             }
 
             processed_count++;
 
             auto it = seen_hashes.find(hash);
             if (it == seen_hashes.end()) {
-                // Первый файл с таким хешем — запоминаем как оригинал
                 seen_hashes[hash] = current_file;
             } else {
-                // Уже видели такой хеш — current_file — дубликат
                 const std::string& original = it->second;
 
                 struct stat orig_stat, curr_stat;
                 if (stat(original.c_str(), &orig_stat) != 0 || stat(current_file.c_str(), &curr_stat) != 0) {
-                    continue; // Не удалось получить метаданные
+                    continue; 
                 }
 
-                // Если это уже одна и та же inode — ничего не делаем
                 if (orig_stat.st_dev == curr_stat.st_dev && orig_stat.st_ino == curr_stat.st_ino) {
                     continue;
                 }
 
-                // Жёсткие ссылки возможны ТОЛЬКО на одной файловой системе
                 if (orig_stat.st_dev != curr_stat.st_dev) {
                     std::cerr << "Пропущен файл на другой ФС: " << current_file << "\n";
                     continue;
                 }
 
-                // Удаляем дубликат
                 if (unlink(current_file.c_str()) != 0) {
                     std::cerr << "Не удалось удалить дубликат: " << current_file << "\n";
                     continue;
                 }
 
-                // Создаём жёсткую ссылку на оригинал
                 if (link(original.c_str(), current_file.c_str()) != 0) {
                     std::cerr << "Не удалось создать жёсткую ссылку: " << current_file << "\n";
-                    // Восстановить файл нельзя без бэкапа — пропускаем
                     continue;
                 }
 
